@@ -5,7 +5,7 @@
 # - For Instagram, paste the RSS.app feed URL for each running club below.
 #   Create one feed per account at https://rss.app/rss-feed/instagram-rss-feed
 
-google_sheet_id: ""          # can also be provided via GOOGLE_SHEET_ID env var
+google_sheet_id: "1DjQO84D3ihq-1VMOYZI6Q7WqC3mAdL-l0fRhZrwOFG4"
 worksheet_name: "Events"
 
 instagram_feeds:
