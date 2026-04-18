@@ -93,6 +93,21 @@ def _parse_date(raw: str) -> datetime | None:
     return None
 
 
+def filter_upcoming(rows: list[dict]) -> list[dict]:
+    """Keep only rows whose date is today or in the future.
+
+    Rows with no parseable date are kept so they aren't silently dropped.
+    """
+    today = datetime.now(timezone.utc).date()
+    kept = []
+    for row in rows:
+        dt = _parse_date(row.get("date", ""))
+        if dt is None or dt.date() >= today:
+            kept.append(row)
+    log.info("Date filter: %d → %d upcoming rows", len(rows), len(kept))
+    return kept
+
+
 def _group_by_date(rows: list[dict]) -> list[tuple[str, list[dict]]]:
     """Return rows grouped by calendar date, sorted ascending.
 
@@ -387,6 +402,7 @@ def main() -> int:
 
     rows = fetch_rows(sheet_id, worksheet_name)
     rows = filter_by_location(rows)
+    rows = filter_upcoming(rows)
     rendered = render_html(rows)
 
     output_path.write_text(rendered, encoding="utf-8")
