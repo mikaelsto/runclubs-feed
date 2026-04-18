@@ -66,6 +66,24 @@ def fetch_rows(sheet_id: str, worksheet_name: str) -> list[dict]:
     return records
 
 
+ALLOWED_CITIES = {
+    "stockholm",
+    "göteborg", "gothenburg",
+    "malmö", "malmoe",
+}
+
+
+def filter_by_location(rows: list[dict]) -> list[dict]:
+    """Keep only rows whose location contains one of the allowed cities."""
+    kept = []
+    for row in rows:
+        loc = (row.get("location") or "").lower()
+        if any(city in loc for city in ALLOWED_CITIES):
+            kept.append(row)
+    log.info("Location filter: %d → %d rows", len(rows), len(kept))
+    return kept
+
+
 def _parse_date(raw: str) -> datetime | None:
     for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
         try:
@@ -338,7 +356,7 @@ def render_html(rows: list[dict]) -> str:
 <body>
   <header class="site-header">
     <h1>Running Clubs Weekly</h1>
-    <p class="tagline">Events &amp; posts from Stockholm's running community</p>
+    <p class="tagline">Events &amp; posts from Sweden's running community</p>
     <p class="generated">Generated {generated_at} · {count} item{"s" if count != 1 else ""}</p>
   </header>
   <main>
@@ -368,6 +386,7 @@ def main() -> int:
         return 1
 
     rows = fetch_rows(sheet_id, worksheet_name)
+    rows = filter_by_location(rows)
     rendered = render_html(rows)
 
     output_path.write_text(rendered, encoding="utf-8")
