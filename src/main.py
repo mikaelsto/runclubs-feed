@@ -1,8 +1,8 @@
 """Entry point for the weekly running-clubs sync.
 
-Loads config, pulls events from Strava + Instagram (via RSS.app),
-deduplicates by link, and appends new rows to the configured Google
-Sheet. Safe to run repeatedly — only new rows are added.
+Loads config, pulls events from Strava, deduplicates by link, and
+appends new rows to the configured Google Sheet. Safe to run
+repeatedly — only new rows are added.
 
 Run locally:
     python -m src.main
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-from src import rss, sheets, strava
+from src import sheets, strava
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -48,7 +48,6 @@ def main() -> int:
         return 1
 
     worksheet_name = config.get("worksheet_name", "Events")
-    instagram_feeds = config.get("instagram_feeds", []) or []
 
     rows: list[dict] = []
 
@@ -60,16 +59,6 @@ def main() -> int:
         log.error("Missing Strava env var: %s", exc)
     except Exception as exc:
         log.exception("Strava fetch failed: %s", exc)
-
-    # --- Instagram via RSS.app ----------------------------------------
-    if instagram_feeds:
-        try:
-            for post in rss.fetch_posts(instagram_feeds):
-                rows.append(dataclasses.asdict(post))
-        except Exception as exc:
-            log.exception("RSS fetch failed: %s", exc)
-    else:
-        log.info("No instagram_feeds configured — skipping RSS step")
 
     log.info("Collected %d total rows before dedupe", len(rows))
 

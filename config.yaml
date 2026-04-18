@@ -1,13 +1,7 @@
 # Running-clubs sync configuration
 #
-# - Strava clubs are auto-discovered from the athlete whose refresh token
-#   is in STRAVA_REFRESH_TOKEN, so nothing to configure here.
-# - For Instagram, paste the RSS.app feed URL for each running club below.
-#   Create one feed per account at https://rss.app/rss-feed/instagram-rss-feed
+# Strava clubs are auto-discovered from the athlete whose refresh token
+# is in STRAVA_REFRESH_TOKEN, so nothing to configure here.
 
 google_sheet_id: "1DjQO84D3ihq-1VMOYZI6Q7WqC3mAdL-l0fRhZrwOFG4"
 worksheet_name: "Events"
-
-instagram_feeds:
-  - https://rss.app/feeds/YjmXz6eUJvG7qzW0.xml   # Mellqvist Runclub (@mellqvistrunclub)
-  - https://rss.app/feeds/waFMfWK63OaAWWMH.xml   # Running Around Club (@runningaroundclub)
