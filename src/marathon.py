@@ -1,18 +1,14 @@
-"""Scrape marathon.se for upcoming races in Stockholm, Göteborg and Malmö.
+"""Scrape upcoming running races (5 km – marathon) for Stockholm, Göteborg and Malmö.
 
 Strategy (tried in order):
-1. Fetch the month+district filtered HTML page. If the race list renders
-   (only happens from certain IPs), parse it directly — fast, ~21 requests.
-2. If the list shows "Inga lopp hittades", fall back to scanning all known
-   race nodes (2017-0 … 2017-418) and filtering by district + date via their
-   structured og:title field — slower but IP-independent.
+1. marathon.se — fast HTML list, works from some IPs (e.g. GitHub Actions EU).
+2. jogg.se     — fully server-rendered, always works; used as fallback.
 
-Writes results to the "Races" worksheet in the configured Google Sheet.
+Writes a full refresh to the "Races" worksheet in the configured Google Sheet.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import logging
 import os
@@ -21,16 +17,17 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import gspread
 import requests
 import yaml
 from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
-import gspread
 
 log = logging.getLogger(__name__)
 
-BASE_URL = "https://www.marathon.se"
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
+BASE_MARATHON = "https://www.marathon.se"
+BASE_JOGG     = "https://www.jogg.se"
+CONFIG_PATH   = Path(__file__).resolve().parent.parent / "config.yaml"
 
 HEADERS = {
     "User-Agent": (
@@ -40,35 +37,25 @@ HEADERS = {
     "Accept-Language": "sv-SE,sv;q=0.9",
 }
 
-# District IDs on marathon.se
-DISTRICTS = {
-    "Stockholm": 296,
-    "Göteborg":  309,
-    "Skåne":     297,  # covers Malmö
+# marathon.se district IDs
+MARATHON_DISTRICTS = {"Stockholm": 296, "Göteborg": 309, "Skåne": 297}
+
+# jogg.se: filter races where county contains one of these strings
+JOGG_TARGET_COUNTIES = {"stockholm", "västra götaland", "skåne"}
+
+# Swedish month name → month number
+SWEDISH_MONTHS = {
+    "januari": 1, "februari": 2, "mars": 3, "april": 4,
+    "maj": 5, "juni": 6, "juli": 7, "augusti": 8,
+    "september": 9, "oktober": 10, "november": 11, "december": 12,
 }
 
-# Filter og:title district/city to these targets
-TARGET_DISTRICTS = {"stockholm", "göteborg", "skåne"}
-TARGET_CITIES    = {"stockholm", "göteborg", "malmö", "malmoe", "gothenburg"}
-
 RACE_HEADERS = [
-    "name", "date", "city", "district", "distance_type", "link", "scraped_at",
+    "name", "date", "city", "county", "distance", "link", "scraped_at",
 ]
 
 
-# ── Data class ────────────────────────────────────────────────────────────────
-
-@dataclasses.dataclass
-class Race:
-    name:          str
-    date:          str
-    city:          str
-    district:      str
-    distance_type: str
-    link:          str
-
-
-# ── HTTP helper ───────────────────────────────────────────────────────────────
+# ── HTTP ──────────────────────────────────────────────────────────────────────
 
 def _get(url: str, retries: int = 2) -> str | None:
     for attempt in range(retries + 1):
@@ -84,186 +71,197 @@ def _get(url: str, retries: int = 2) -> str | None:
     return None
 
 
-# ── Fast path: HTML list page ─────────────────────────────────────────────────
+# ── Month helpers ─────────────────────────────────────────────────────────────
 
-def _parse_list_page(html: str, district_name: str) -> list[Race]:
-    """Parse a rendered race-list page. Returns [] if the list did not render."""
+def _month_range(n: int = 6) -> list[tuple[int, int]]:
+    """Return (year, month) tuples for the current month + next n-1 months."""
+    today = date.today()
+    result = []
+    for offset in range(n):
+        total = today.month + offset - 1
+        result.append((today.year + total // 12, total % 12 + 1))
+    return result
+
+
+# ── Source 1: marathon.se ─────────────────────────────────────────────────────
+
+def _marathon_parse_list(html: str) -> list[dict]:
+    """Parse a rendered race list page from marathon.se.
+
+    Returns an empty list when the view shows 'Inga lopp hittades'.
+    """
     soup = BeautifulSoup(html, "html.parser")
     pane = soup.find("div", class_="Pane-content")
     if not pane or "Inga lopp hittades" in pane.get_text():
         return []
 
-    races: list[Race] = []
-
-    # The rendered list uses elements with class names like RaceItem / Race-item.
-    # We scan for any <a> tag inside the pane that links to a /loppen/ page.
+    races = []
     for a in pane.find_all("a", href=re.compile(r"/loppen/")):
         href = a["href"]
-        link = href if href.startswith("http") else BASE_URL + href
+        link = href if href.startswith("http") else BASE_MARATHON + href
         text = a.get_text(separator=" ", strip=True)
-
-        # Try to extract a date from the link text (YYYY-MM-DD or DD mon YYYY)
-        date_match = re.search(r"\d{4}-\d{2}-\d{2}", text)
-        date_str = date_match.group(0) if date_match else ""
-
-        races.append(Race(
-            name=text[:120],
-            date=date_str,
-            city=district_name,
-            district=district_name,
-            distance_type="",
-            link=link,
-        ))
-
-    if races:
-        log.info("Fast path: %d races from %s", len(races), district_name)
+        date_m = re.search(r"\d{4}-\d{2}-\d{2}", text)
+        races.append({
+            "name":     text[:120],
+            "date":     date_m.group(0) if date_m else "",
+            "city":     "",
+            "county":   "",
+            "distance": "",
+            "link":     link,
+        })
     return races
 
 
-def _fast_scrape() -> list[Race]:
-    """Try the HTML list page for each district × next 6 months."""
-    today = date.today()
-    races: list[Race] = []
-    rendered = False
-
-    for district_name, district_id in DISTRICTS.items():
-        for offset in range(7):
-            total_month = today.month + offset
-            year  = today.year + (total_month - 1) // 12
-            month = (total_month - 1) % 12 + 1
-
+def _scrape_marathon() -> list[dict]:
+    races: list[dict] = []
+    for district_name, district_id in MARATHON_DISTRICTS.items():
+        for year, month in _month_range():
             url = (
-                f"{BASE_URL}/lopp"
+                f"{BASE_MARATHON}/lopp"
                 f"?datum%5Bvalue%5D%5Byear%5D={year}"
                 f"&datum%5Bvalue%5D%5Bmonth%5D={month}"
                 f"&distrikt={district_id}"
             )
             html = _get(url)
-            if not html:
-                continue
-            found = _parse_list_page(html, district_name)
-            if found:
-                rendered = True
-                races.extend(found)
+            if html:
+                races.extend(_marathon_parse_list(html))
 
-    if rendered:
-        log.info("Fast path worked — got %d races total", len(races))
+    if races:
+        log.info("marathon.se: %d races found", len(races))
     else:
-        log.info("Fast path returned nothing (IP-gated?) — will fall back")
+        log.info("marathon.se: list did not render (likely IP-gated)")
     return races
 
 
-# ── Slow path: node scan ──────────────────────────────────────────────────────
+# ── Source 2: jogg.se (reliable fallback) ─────────────────────────────────────
 
-def _parse_og_title(html: str) -> dict | None:
-    """Extract race fields from the semicolon-delimited og:title.
-
-    Expected format: name;YYYY-MM-DD;city;district;;;
-    """
-    m = re.search(r'property="og:title"\s+content="([^"]+)"', html)
+def _parse_swedish_date(text: str) -> str:
+    """Parse 'fredag 3 april 2026' → '2026-04-03'. Returns '' on failure."""
+    m = re.search(r"(\d+)\s+(\w+)\s+(\d{4})", text.lower())
     if not m:
-        m = re.search(r'og:title.*?content="([^"]+)"', html)
+        return ""
+    day, month_name, year = int(m.group(1)), m.group(2), int(m.group(3))
+    month = SWEDISH_MONTHS.get(month_name)
+    if not month:
+        return ""
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _parse_distance(text: str) -> str:
+    """'10,00 km ' → '10 km'"""
+    text = text.strip()
+    m = re.search(r"([\d,\.]+)\s*km", text, re.IGNORECASE)
     if not m:
-        return None
-
-    parts = m.group(1).split(";")
-    if len(parts) < 4:
-        return None
-    name, date_str, city, district = (p.strip() for p in parts[:4])
-    if not name or name == ";;;;;;":
-        return None
-    return {"name": name, "date": date_str, "city": city, "district": district}
-
-
-def _is_target(data: dict) -> bool:
-    district = data.get("district", "").lower()
-    city     = data.get("city",     "").lower()
-    return (
-        any(t in district for t in TARGET_DISTRICTS) or
-        any(t in city     for t in TARGET_CITIES)
-    )
-
-
-def _is_upcoming(date_str: str) -> bool:
+        return text
+    num = m.group(1).replace(",", ".")
     try:
-        return datetime.strptime(date_str, "%Y-%m-%d").date() >= date.today()
+        km = float(num)
+        return f"{km:g} km"
     except ValueError:
-        return False
+        return text
 
 
-def _node_scan(max_id: int = 419) -> list[Race]:
-    """Scan all known race nodes and filter by district + upcoming date."""
-    log.info("Node scan: checking %d race pages …", max_id)
-    races: list[Race] = []
+def _scrape_jogg() -> list[dict]:
+    races: list[dict] = []
+    today = date.today()
 
-    for i in range(max_id):
-        url  = f"{BASE_URL}/loppen/2017-{i}"
+    for year, month in _month_range(n=6):
+        url = (
+            f"{BASE_JOGG}/Kalender/Tavlingar.aspx"
+            f"?aar={year}&mon={month}"
+            f"&fdist=5&tdist=43&type=0&country=1&region=0"
+            f"&tlopp=False&relay=False&surface=&tridist=0&title=1"
+        )
         html = _get(url)
         if not html:
             continue
 
-        data = _parse_og_title(html)
-        if not data:
-            continue
-        if not _is_upcoming(data["date"]):
-            continue
-        if not _is_target(data):
+        soup     = BeautifulSoup(html, "html.parser")
+        calendar = soup.find("div", id="MainContent_newCalendar")
+        if not calendar:
             continue
 
-        races.append(Race(
-            name=data["name"],
-            date=data["date"],
-            city=data["city"],
-            district=data["district"],
-            distance_type="",
-            link=url,
-        ))
-        log.info("  ✓ %s  %s  %s", data["date"], data["name"], data["city"])
-        time.sleep(0.15)  # polite crawl delay
+        boxes = [
+            b for b in calendar.find_all("div", recursive=False)
+            if "racebox" in b.get("id", "")
+        ]
 
-    log.info("Node scan complete — %d races found", len(races))
+        for box in boxes:
+            county_el   = box.find("div", class_="county")
+            city_el     = box.find("div", class_="city")
+            name_el     = box.find("div", class_="name")
+            date_el     = box.find("span", id=lambda x: x and "dateValue" in (x or ""))
+            dist_el     = box.find("div", class_="distanceInfo")
+            link_el     = name_el.find("a") if name_el else None
+
+            if not all([county_el, name_el, date_el, link_el]):
+                continue
+
+            county = county_el.get_text(strip=True)  # e.g. "Sverige / Stockholm"
+            county_lower = county.lower()
+
+            # Filter to target regions
+            if not any(t in county_lower for t in JOGG_TARGET_COUNTIES):
+                continue
+
+            race_date = _parse_swedish_date(date_el.get_text())
+            if not race_date:
+                continue
+
+            # Skip past events
+            try:
+                if datetime.strptime(race_date, "%Y-%m-%d").date() < today:
+                    continue
+            except ValueError:
+                continue
+
+            href = link_el["href"]
+            link = href if href.startswith("http") else BASE_JOGG + href
+
+            # Extract clean county name (after the slash)
+            county_clean = county.split("/")[-1].strip() if "/" in county else county
+
+            races.append({
+                "name":     link_el.get_text(strip=True),
+                "date":     race_date,
+                "city":     city_el.get_text(strip=True) if city_el else "",
+                "county":   county_clean,
+                "distance": _parse_distance(dist_el.get_text()) if dist_el else "",
+                "link":     link,
+            })
+
+    log.info("jogg.se: %d races found", len(races))
     return races
 
 
-# ── Public entry point ────────────────────────────────────────────────────────
+# ── Deduplicate & sort ────────────────────────────────────────────────────────
 
-def fetch_races() -> list[Race]:
-    """Return upcoming races for Stockholm, Göteborg and Malmö from marathon.se."""
-    races = _fast_scrape()
-    if not races:
-        races = _node_scan()
-
-    # Deduplicate by (name, date)
+def _dedup(races: list[dict]) -> list[dict]:
     seen: set[tuple[str, str]] = set()
-    unique: list[Race] = []
+    result = []
     for r in races:
-        key = (r.name.lower(), r.date)
+        key = (r["name"].lower(), r["date"])
         if key not in seen:
             seen.add(key)
-            unique.append(r)
-
-    unique.sort(key=lambda r: r.date)
-    log.info("fetch_races: %d unique upcoming races", len(unique))
-    return unique
+            result.append(r)
+    return sorted(result, key=lambda r: r["date"])
 
 
-# ── Google Sheets writer ──────────────────────────────────────────────────────
+# ── Google Sheets ─────────────────────────────────────────────────────────────
 
 def _sheet_client() -> gspread.Client:
-    raw  = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-    info = json.loads(raw)
+    raw   = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
     creds = Credentials.from_service_account_info(
-        info,
+        json.loads(raw),
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
     return gspread.authorize(creds)
 
 
-def write_to_sheet(races: list[Race], sheet_id: str, worksheet_name: str = "Races") -> int:
-    """Overwrite the Races worksheet with fresh data (full refresh each run)."""
+def write_to_sheet(races: list[dict], sheet_id: str, worksheet_name: str = "Races") -> int:
+    """Full refresh — clears and rewrites the Races worksheet."""
     gc = _sheet_client()
     sh = gc.open_by_key(sheet_id)
-
     try:
         ws = sh.worksheet(worksheet_name)
     except gspread.WorksheetNotFound:
@@ -272,24 +270,23 @@ def write_to_sheet(races: list[Race], sheet_id: str, worksheet_name: str = "Race
 
     scraped_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows = [RACE_HEADERS] + [
-        [r.name, r.date, r.city, r.district, r.distance_type, r.link, scraped_at]
+        [r["name"], r["date"], r["city"], r["county"],
+         r["distance"], r["link"], scraped_at]
         for r in races
     ]
-
     ws.clear()
     ws.update("A1", rows, value_input_option="USER_ENTERED")
-    log.info("Wrote %d races to '%s'", len(races), worksheet_name)
+    log.info("Wrote %d rows to '%s'", len(races), worksheet_name)
     return len(races)
 
 
-# ── CLI entry point ───────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> int:
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-
     with CONFIG_PATH.open() as f:
         config = yaml.safe_load(f) or {}
 
@@ -298,7 +295,11 @@ def main() -> int:
         log.error("GOOGLE_SHEET_ID not set")
         return 1
 
-    races = fetch_races()
+    races = _scrape_marathon()
+    if not races:
+        races = _scrape_jogg()
+
+    races = _dedup(races)
     write_to_sheet(races, sheet_id)
     return 0
 
