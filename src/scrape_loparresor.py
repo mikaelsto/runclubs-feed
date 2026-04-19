@@ -14,6 +14,7 @@ Usage:
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -143,7 +144,7 @@ def _scrape_springtime(session: requests.Session, url: str, source_name: str) ->
     now = datetime.now(timezone.utc).isoformat()
 
     for item in items:
-        name = (item.get("title") or "").strip()
+        name = html.unescape((item.get("title") or "").strip())
         if not name:
             continue
 
@@ -247,56 +248,47 @@ def _sheet_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 
-def _get_or_create_worksheet(sh: gspread.Spreadsheet) -> gspread.Worksheet:
-    try:
-        ws = sh.worksheet("Loparresor")
-        log.info("Found existing 'Loparresor' worksheet")
-        return ws
-    except gspread.WorksheetNotFound:
-        log.info("Creating 'Loparresor' worksheet")
-        ws = sh.add_worksheet(title="Loparresor", rows=1000, cols=len(HEADER))
-        ws.append_row(HEADER, value_input_option="RAW")
-        return ws
+def _ensure_header(ws: gspread.Worksheet) -> None:
+    existing = ws.row_values(1)
+    if existing != HEADER:
+        ws.update("A1", [HEADER])
+        log.info("Wrote header row")
+
+
+def _existing_links(ws: gspread.Worksheet) -> set[str]:
+    link_col = HEADER.index("link") + 1  # 1-based
+    values = ws.col_values(link_col)
+    return set(v for v in values[1:] if v)
 
 
 def upsert_trips(sheet_id: str, trips: list[dict]) -> None:
     gc = _sheet_client()
     sh = gc.open_by_key(sheet_id)
-    ws = _get_or_create_worksheet(sh)
 
-    # Read existing data to build dedup index
-    existing = ws.get_all_records(expected_headers=HEADER)
-    # Key: (source, link) → row index (1-based, +1 for header row = row_idx+2)
-    existing_index: dict[tuple, int] = {}
-    for row_idx, row in enumerate(existing):
-        key = (row.get("source", ""), row.get("link", ""))
-        if key[1]:  # only index rows that have a link
-            existing_index[key] = row_idx + 2  # +1 for header, +1 for 1-based
+    try:
+        ws = sh.worksheet("Loparresor")
+        log.info("Found existing 'Loparresor' worksheet")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Loparresor", rows=1000, cols=len(HEADER))
+        log.info("Created 'Loparresor' worksheet")
 
-    added = updated = skipped = 0
+    _ensure_header(ws)
+    seen = _existing_links(ws)
 
+    new_rows = []
     for trip in trips:
-        if not trip.get("link"):
-            skipped += 1
+        link = trip.get("link", "")
+        if not link or link in seen:
             continue
+        seen.add(link)
+        new_rows.append([str(trip.get(col, "")) for col in HEADER])
 
-        key = (trip["source"], trip["link"])
-        row_values = [trip.get(col, "") for col in HEADER]
+    if not new_rows:
+        log.info("All %d trips already in sheet — nothing to add", len(trips))
+        return
 
-        if key in existing_index:
-            # Update everything EXCEPT the "publish" column (last column)
-            sheet_row = existing_index[key]
-            update_values = row_values[:-1]  # all but "publish"
-            # Update columns A through (len(HEADER)-1)
-            end_col_letter = chr(ord("A") + len(HEADER) - 2)  # e.g. "L" for 12 cols
-            range_notation = f"A{sheet_row}:{end_col_letter}{sheet_row}"
-            ws.update(range_notation, [update_values], value_input_option="RAW")
-            updated += 1
-        else:
-            ws.append_row(row_values, value_input_option="RAW")
-            added += 1
-
-    log.info("Sheet upsert done — %d added, %d updated, %d skipped", added, updated, skipped)
+    ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+    log.info("Added %d new trips to sheet (%d already existed)", len(new_rows), len(trips) - len(new_rows))
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
