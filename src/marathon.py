@@ -259,7 +259,7 @@ def _sheet_client() -> gspread.Client:
 
 
 def write_to_sheet(races: list[dict], sheet_id: str, worksheet_name: str = "Races") -> int:
-    """Full refresh — clears and rewrites the Races worksheet."""
+    """Refresh the Races worksheet, preserving any extra columns (e.g. official_url)."""
     gc = _sheet_client()
     sh = gc.open_by_key(sheet_id)
     try:
@@ -268,15 +268,42 @@ def write_to_sheet(races: list[dict], sheet_id: str, worksheet_name: str = "Race
         ws = sh.add_worksheet(title=worksheet_name, rows=1000, cols=len(RACE_HEADERS))
         log.info("Created worksheet '%s'", worksheet_name)
 
+    # Read existing extra-column data keyed by (name, date) so we can re-attach it
+    existing = ws.get_all_values()
+    extra_cols: dict[tuple[str, str], list[str]] = {}
+    if len(existing) > 1:
+        old_headers = existing[0]
+        n_base = len(RACE_HEADERS)
+        if len(old_headers) > n_base:
+            for old_row in existing[1:]:
+                key = (old_row[0].strip(), old_row[1].strip())  # name, date
+                extra = old_row[n_base:] if len(old_row) > n_base else []
+                if any(extra):
+                    extra_cols[key] = extra
+
+    # Build full header row
+    extra_headers = [h for h in (existing[0] if existing else []) if h not in RACE_HEADERS] or []
+    all_headers = RACE_HEADERS + extra_headers
+
     scraped_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    rows = [RACE_HEADERS] + [
-        [r["name"], r["date"], r["city"], r["county"],
-         r["distance"], r["link"], scraped_at]
-        for r in races
-    ]
+    rows = [all_headers]
+    for r in races:
+        base = [r["name"], r["date"], r["city"], r["county"],
+                r["distance"], r["link"], scraped_at]
+        key = (r["name"].strip(), r["date"].strip())
+        extra = extra_cols.get(key, [""] * len(extra_headers))
+        # Pad/trim to match extra_headers length
+        extra = (extra + [""] * len(extra_headers))[: len(extra_headers)]
+        rows.append(base + extra)
+
+    # Ensure sheet has enough columns
+    n_cols = max(len(all_headers), ws.col_count)
+    if n_cols > ws.col_count:
+        ws.resize(rows=1000, cols=n_cols)
+
     ws.clear()
     ws.update("A1", rows, value_input_option="USER_ENTERED")
-    log.info("Wrote %d rows to '%s'", len(races), worksheet_name)
+    log.info("Wrote %d rows to '%s' (%d columns)", len(races), worksheet_name, len(all_headers))
     return len(races)
 
 
