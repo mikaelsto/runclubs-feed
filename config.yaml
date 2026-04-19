@@ -5,3 +5,15 @@
 
 google_sheet_id: "1DjQO84D3ihq-1VMOYZI6Q7WqC3mAdL-l0fRhZrwOFG4"
 worksheet_name: "Events"
+
+# ── Löparresor ────────────────────────────────────────────────────────────────
+# Sheet where scraped running trips are stored (read by amandahultin/runclubs
+# to generate loparresor.html).
+loparresor_sheet_id: "1xm77U0ltOUAw564vhViVdaUEq_q2x4WW_yjtiADwbwQ"
+
+# Sites to scrape. Add new sources here.
+# type: scraper implementation — currently only "springtime" exists.
+loparresor_sources:
+  - name: "springtime.se"
+    url: "https://springtime.se/loparresor/"
+    type: "springtime"
