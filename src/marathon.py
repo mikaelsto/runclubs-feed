@@ -294,9 +294,15 @@ def write_to_sheet(races: list[dict], sheet_id: str, worksheet_name: str = "Race
         base = [r["name"], r["date"], r["city"], r["county"],
                 r["distance"], r["link"], scraped_at]
         key = (r["name"].strip(), r["date"].strip())
-        extra = extra_cols.get(key, [""] * len(extra_headers))
-        # Pad/trim to match extra_headers length
-        extra = (extra + [""] * len(extra_headers))[: len(extra_headers)]
+        if key in extra_cols:
+            # Race already exists — preserve whatever the user has in extra columns
+            extra = (extra_cols[key] + [""] * len(extra_headers))[: len(extra_headers)]
+        else:
+            # New race — seed official_url with the scraped link
+            extra = [
+                r.get("link", "") if h == "official_url" else ""
+                for h in extra_headers
+            ]
         rows.append(base + extra)
 
     # Ensure sheet has enough columns
