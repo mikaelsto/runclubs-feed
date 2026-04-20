@@ -281,8 +281,11 @@ def write_to_sheet(races: list[dict], sheet_id: str, worksheet_name: str = "Race
                 if any(extra):
                     extra_cols[key] = extra
 
-    # Build full header row
-    extra_headers = [h for h in (existing[0] if existing else []) if h not in RACE_HEADERS] or []
+    # Build full header row — always ensure official_url column is present
+    existing_extra = [h for h in (existing[0] if existing else []) if h not in RACE_HEADERS]
+    if "official_url" not in existing_extra:
+        existing_extra.append("official_url")
+    extra_headers = existing_extra
     all_headers = RACE_HEADERS + extra_headers
 
     scraped_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
