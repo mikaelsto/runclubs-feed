@@ -2,7 +2,7 @@ name: Weekly events sync
 
 on:
   schedule:
-    - cron: "0 8 * * 1"   # Every Monday at 08:00 UTC
+    - cron: "0 7 * * *"   # Every day at 07:00 UTC
   workflow_dispatch:        # Allow manual runs from GitHub UI
 
 permissions:
