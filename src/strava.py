@@ -84,18 +84,8 @@ def _list_my_clubs(access_token: str) -> list[dict]:
 
 
 def _list_club_events(access_token: str, club_id: int) -> list[dict]:
-    """Return all group events for a club (paginated)."""
-    events: list[dict] = []
-    page = 1
-    while True:
-        batch = _get(access_token, f"/clubs/{club_id}/group_events", {"page": page, "per_page": 30})
-        if not batch:
-            break
-        events.extend(batch)  # type: ignore[arg-type]
-        if len(batch) < 30:
-            break
-        page += 1
-    return events
+    """Return all group events for a club."""
+    return _get(access_token, f"/clubs/{club_id}/group_events")  # type: ignore[return-value]
 
 
 def _format_occurrence(
