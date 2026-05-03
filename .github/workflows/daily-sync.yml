@@ -2,7 +2,10 @@ name: Daily events sync
 
 on:
   schedule:
-    - cron: "0 4 * * *"   # Every day at 04:00 UTC
+    - cron: "0 4 * * *"    # 04:00 UTC
+    - cron: "0 10 * * *"   # 10:00 UTC
+    - cron: "0 16 * * *"   # 16:00 UTC
+    - cron: "0 22 * * *"   # 22:00 UTC
   workflow_dispatch:        # Allow manual runs from GitHub UI
 
 permissions:
